@@ -1,11 +1,12 @@
 """
 inference.py – Baseline inference script for the AI Code Review RL Environment.
 
+For OpenEnv Hackathon: Uses Hugging Face models via HF Router.
+
 Reads config from environment variables:
-  OPENAI_API_KEY   – API key (required)
-  API_BASE_URL     – Base URL of the OpenEnv server (default: http://localhost:7860)
-  MODEL_NAME       – Model to use (default: gpt-4o-mini)
-  HF_TOKEN         – Hugging Face token (used if API_BASE_URL points to HF Space)
+  HF_TOKEN         – Hugging Face API token (required) - get from https://huggingface.co/settings/tokens
+  API_BASE_URL     – Base URL of the OpenEnv environment (default: http://localhost:7860)
+  MODEL_NAME       – HuggingFace model to use (default: Qwen/Qwen2-72B-Instruct)
 
 Logs in required format:
   [START] Task={task_name} Env=ai-code-review-env Model={model}
@@ -13,9 +14,9 @@ Logs in required format:
   [END]   success=True/False steps=N score=0.XX rewards=[...]
 
 Usage:
-  export OPENAI_API_KEY=sk-...
-  export API_BASE_URL=http://localhost:7860
-  export MODEL_NAME=gpt-4o-mini
+  export HF_TOKEN="hf_..."
+  export API_BASE_URL="http://localhost:7860"
+  export MODEL_NAME="Qwen/Qwen2-72B-Instruct"
   python inference.py
 """
 
@@ -23,33 +24,23 @@ import os
 import sys
 import json
 import httpx
-from openai import OpenAI
+from huggingface_hub import InferenceClient
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
 # ---------------------------------------------------------------------------
-OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-API_BASE_URL: str = os.environ.get("API_BASE_URL", "http://localhost:7860").rstrip("/")
-GROQ_BASE_URL: str = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
-MODEL_NAME: str = os.environ.get("MODEL_NAME", "llama-3.1-8b-instant")
 HF_TOKEN: str = os.environ.get("HF_TOKEN", "")
+API_BASE_URL: str = os.environ.get("API_BASE_URL", "http://localhost:7860").rstrip("/")
+MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2-72B-Instruct")
 
-if not OPENAI_API_KEY:
-    print("ERROR: OPENAI_API_KEY environment variable is not set.", file=sys.stderr)
+if not HF_TOKEN:
+    print("ERROR: HF_TOKEN environment variable is not set.", file=sys.stderr)
+    print("Get your free token from: https://huggingface.co/settings/tokens", file=sys.stderr)
     sys.exit(1)
 
-# Build OpenAI (Grok-compatible) client
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=GROQ_BASE_URL)
-
-# Validate model availability (log so you can fix MODEL_NAME early)
-try:
-    models = client.models.list()
-    if hasattr(models, "data"):
-        print(f"Grok client connected. Available models: {len(models.data)}")
-    else:
-        print("Grok client connected; model list response received.")
-except Exception as e:
-    print(f"WARNING: Could not list models from Grok endpoint: {e}")
+# Build Hugging Face Inference client
+client = InferenceClient(api_key=HF_TOKEN)
+print(f"✅ Hugging Face Inference client initialized with model: {MODEL_NAME}")
 
 ENV_NAME = "ai-code-review-env"
 TASKS = [
@@ -124,16 +115,12 @@ Find ONE new issue and respond with ONLY the JSON object. Use the exact line num
 
 def call_env(method: str, path: str, payload: dict = None) -> dict:
     """Call the OpenEnv server."""
-    headers = {}
-    if HF_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_TOKEN}"
-
     url = f"{API_BASE_URL}{path}"
     with httpx.Client(timeout=30) as http:
         if method == "POST":
-            resp = http.post(url, json=payload or {}, headers=headers)
+            resp = http.post(url, json=payload or {})
         else:
-            resp = http.get(url, headers=headers)
+            resp = http.get(url)
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -240,18 +227,27 @@ def run_task(task_name: str) -> dict:
         user_msg = build_user_prompt(obs)
         conversation.append({"role": "user", "content": user_msg})
 
-        # Ask LLM
-        # Truncate conversation to avoid TPM limits: keep system + last 4 messages (2 exchanges)
-        full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation
-        if len(full_messages) > 5:  # system + 4 messages
-            full_messages = full_messages[:1] + full_messages[-4:]
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=full_messages,
-            temperature=0,
-            max_tokens=256,
-        )
-        raw = completion.choices[0].message.content
+        # Ask LLM via Hugging Face Inference (conversational API)
+        try:
+            response_text = client.chat_completion(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    *conversation
+                ],
+                max_tokens=256,
+                temperature=0,
+            )
+            raw = response_text.choices[0].message.content
+        except Exception as e:
+            print(f"WARNING: HF API call failed: {e}. Using default action.")
+            raw = json.dumps({
+                "action_type": "REQUEST_CHANGES",
+                "line_number": None,
+                "issue_type": "none",
+                "comment": "Unable to analyze at this time."
+            })
+        
         conversation.append({"role": "assistant", "content": raw})
 
         # Parse action
