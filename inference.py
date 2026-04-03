@@ -23,6 +23,7 @@ Usage:
 import os
 import sys
 import json
+import random
 import httpx
 from huggingface_hub import InferenceClient
 
@@ -42,12 +43,59 @@ if not HF_TOKEN:
 client = InferenceClient(api_key=HF_TOKEN)
 print(f"✅ Hugging Face Inference client initialized with model: {MODEL_NAME}")
 
+# Optional backup model candidates (try in order if MODEL_NAME fails)
+MODEL_CANDIDATES = [
+    "mistralai/Mistral-7B-Instruct",
+    "tiiuae/falcon-7b-instruct",
+    "bigcode/starcoder",
+    "meta-llama/Llama-2-7b-chat-hf",
+    "google/flan-ul2",
+    "gpt2",
+]
+
 ENV_NAME = "ai-code-review-env"
 TASKS = [
     "fix_syntax_and_obvious_bugs",
     "logic_and_security_review",
     "design_and_architecture_review",
 ]
+
+
+def select_supported_model(preferred: str):
+    """Pick an HF model that is supported by the current token/provider."""
+    def try_model(name):
+        try:
+            # Quick health check via small chat call with a safe query
+            resp = client.chat_completion(
+                model=name,
+                messages=[
+                    {"role": "system", "content": "You are a test model."},
+                    {"role": "user", "content": "Hello"},
+                ],
+                max_tokens=1,
+                temperature=0,
+            )
+            return True
+        except Exception:
+            return False
+
+    if try_model(preferred):
+        return preferred
+
+    print(f"⚠️ Preferred model '{preferred}' unsupported, trying fallback candidates...")
+    for candidate in MODEL_CANDIDATES:
+        if candidate == preferred:
+            continue
+        if try_model(candidate):
+            print(f"✅ Switched to supported model: {candidate}")
+            return candidate
+
+    print("❌ No supported model found, continuing with preferred model and fallback actions.")
+    return preferred
+
+
+MODEL_NAME = select_supported_model(MODEL_NAME)
+
 
 # ---------------------------------------------------------------------------
 # System prompt for the agent
@@ -127,6 +175,26 @@ def call_env(method: str, path: str, payload: dict = None) -> dict:
         print(f"ERROR calling {url}: {exc.response.status_code} {exc.response.text}")
         raise
     return resp.json()
+
+
+def random_action(obs: dict):
+    """Fallback random action when model call fails."""
+    issue_types = ["syntax", "logic", "security", "performance", "style", "design", "none"]
+    action_types = ["FLAG_BUG", "SUGGEST_FIX", "ADD_COMMENT", "REQUEST_CHANGES", "APPROVE"]
+    code_lines = len(obs.get("code_snippet", "").splitlines()) or 1
+
+    action_type = "APPROVE" if obs.get("remaining_issues_hint", 0) == 0 else random.choice(["FLAG_BUG", "SUGGEST_FIX", "ADD_COMMENT"])
+    line = None
+    if action_type in {"FLAG_BUG", "SUGGEST_FIX", "ADD_COMMENT"}:
+        line = random.randint(1, min(50, code_lines))
+
+    return {
+        "action_type": action_type,
+        "line_number": line,
+        "issue_type": random.choice(issue_types),
+        "comment": "Fallback action from local policy.",
+    }
+
 
 
 def parse_action(raw_text: str) -> dict:
@@ -228,6 +296,7 @@ def run_task(task_name: str) -> dict:
         conversation.append({"role": "user", "content": user_msg})
 
         # Ask LLM via Hugging Face Inference (conversational API)
+        action_dict = None
         try:
             response_text = client.chat_completion(
                 model=MODEL_NAME,
@@ -239,19 +308,14 @@ def run_task(task_name: str) -> dict:
                 temperature=0,
             )
             raw = response_text.choices[0].message.content
+            conversation.append({"role": "assistant", "content": raw})
+            action_dict = parse_action(raw)
         except Exception as e:
-            print(f"WARNING: HF API call failed: {e}. Using default action.")
-            raw = json.dumps({
-                "action_type": "REQUEST_CHANGES",
-                "line_number": None,
-                "issue_type": "none",
-                "comment": "Unable to analyze at this time."
-            })
-        
-        conversation.append({"role": "assistant", "content": raw})
+            print(f"WARNING: HF API call failed: {e}. Using fallback random action.")
+            action_dict = random_action(obs)
 
-        # Parse action
-        action_dict = parse_action(raw)
+        # Step environment
+        step_resp = call_env("POST", "/step", action_dict)
 
         # Step environment
         step_resp = call_env("POST", "/step", action_dict)
