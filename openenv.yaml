@@ -1,0 +1,92 @@
+name: ai-code-review-env
+version: "1.0.0"
+description: >
+  A realistic RL environment where an AI agent acts as a code reviewer.
+  The agent receives code snippets containing real-world bugs (syntax errors,
+  logic flaws, security vulnerabilities, design anti-patterns) and must flag,
+  explain, and suggest fixes. Three tasks of increasing difficulty are provided,
+  each with a deterministic grader that scores the agent 0–1.
+
+author: Hackathon Submission
+tags:
+  - openenv
+  - code-review
+  - software-engineering
+  - security
+  - realistic
+
+environment:
+  type: text
+  language: python
+
+observation:
+  type: object
+  description: Structured snapshot of the code under review and episode state
+  fields:
+    code_snippet: string
+    language: string
+    context: string
+    step_number: integer
+    max_steps: integer
+    issues_found_so_far: array
+    remaining_issues_hint: integer
+    task_name: string
+    task_difficulty: string
+
+action:
+  type: object
+  description: A code review action taken by the agent
+  fields:
+    action_type:
+      type: string
+      enum: [FLAG_BUG, SUGGEST_FIX, APPROVE, REQUEST_CHANGES, ADD_COMMENT]
+    line_number:
+      type: integer
+      required_for: [FLAG_BUG, SUGGEST_FIX, ADD_COMMENT]
+    issue_type:
+      type: string
+      enum: [syntax, logic, security, performance, style, design, none]
+    comment:
+      type: string
+
+reward:
+  type: float
+  range: [-0.5, 1.5]
+  description: >
+    Shaped reward per step.
+    +1.0 for correctly identifying an issue (right line + matching explanation)
+    +0.5 partial credit for correct line, wrong explanation
+    -0.2 for flagging a non-issue line
+    +1.5 for APPROVE when all issues found
+    -0.5 for premature APPROVE
+
+tasks:
+  - name: fix_syntax_and_obvious_bugs
+    difficulty: easy
+    total_issues: 3
+    max_steps: 8
+    description: Find syntax error, off-by-one, and zero-division bug in a small function
+
+  - name: logic_and_security_review
+    difficulty: medium
+    total_issues: 4
+    max_steps: 12
+    description: Detect SQL injection, missing auth, implicit None return, and resource leak in a Flask handler
+
+  - name: design_and_architecture_review
+    difficulty: hard
+    total_issues: 5
+    max_steps: 18
+    description: Identify hardcoded secret, mutable default, SRP violation, swallowed exception, and race condition in a class
+
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state
+  health: GET /health
+  tasks: GET /tasks
+  score: GET /score
+
+docker:
+  port: 7860
+  cmd: uvicorn app.main:app --host 0.0.0.0 --port 7860
