@@ -102,7 +102,7 @@ class CodeReviewEnv(gym.Env):
         action_dict = {
             "action_type": action_type,
             "line_number": line_number if action_type in ["FLAG_BUG", "SUGGEST_FIX", "ADD_COMMENT"] else None,
-            "issue_type": issue_type,
+            "issue_type": issue_type if action_type in ["FLAG_BUG", "SUGGEST_FIX"] else None,
             "comment": comment,
         }
         
@@ -119,6 +119,14 @@ class CodeReviewEnv(gym.Env):
             truncated = self.episode_steps >= self.current_obs.get("max_steps", 20)
             
             info = {"raw_reward": reward, "done": done}
+            if done:
+                try:
+                    score_resp = requests.get(f"{self.base_url}/score", timeout=10)
+                    score_resp.raise_for_status()
+                    score_data = score_resp.json()
+                    info["accuracy_score"] = score_data.get("score")
+                except Exception:
+                    info["accuracy_score"] = None
             return encoded_obs, float(reward), done, truncated, info
         except Exception as e:
             print(f"Step error: {e}")
